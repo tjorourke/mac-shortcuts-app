@@ -158,7 +158,7 @@ struct FooterLink: View {
     @State private var hover = false
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: symbol).font(.system(size: 12, weight: .medium))
+            Label(title, systemImage: symbol).font(.system(size: 12, weight: .medium)).lineLimit(1).fixedSize()
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Color.primary.opacity(hover ? 0.09 : 0.05), in: Capsule())
         }
@@ -232,11 +232,11 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(statusColour.opacity(0.25)))
 
             VStack(spacing: 6) {
-                ActionButton(title: "Start EKS", detail: "Gateway and Solo UI · about 5 to 10 min",
+                ActionButton(title: "Start EKS", detail: "agentgateway and its UI · about 5 to 10 min",
                              symbol: "play.fill", tint: .green) { lab.start("up", label: "starting") }
                 ActionButton(title: "Start with GPUs", detail: "Adds two g7e GPUs · about $12.60/hr",
                              symbol: "bolt.fill", tint: .purple) { lab.start("gpu-up", label: "starting with GPUs") }
-                ActionButton(title: "Stop GPUs only", detail: "Gateway and Solo UI keep running",
+                ActionButton(title: "Stop GPUs only", detail: "agentgateway and its UI keep running",
                              symbol: "bolt.slash.fill", tint: .orange) { lab.start("gpu-down", label: "stopping GPUs") }
                 ActionButton(title: "Stop EKS", detail: "Every node to 0 · control plane stays",
                              symbol: "stop.fill", tint: .red) { confirmStop = true }
@@ -248,7 +248,7 @@ struct ContentView: View {
                 Button { lab.openConsole() } label: {
                     HStack(spacing: 6) {
                         Circle().fill(lab.consoleUp ? Color.green : Color.red).frame(width: 7, height: 7)
-                        Text(lab.openingConsole ? "Starting console…" : (lab.consoleUp ? "Demo console" : "Start demo console"))
+                        Text(lab.openingConsole ? "Starting…" : (lab.consoleUp ? "Demo console" : "Start console"))
                             .font(.system(size: 12, weight: .semibold)).lineLimit(1).fixedSize()
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -256,20 +256,25 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain).disabled(lab.openingConsole)
                 .help("Opens the demo console, starting it first if it is down")
-                FooterLink(title: "Solo UI", symbol: "safari") { if let u = lab.soloUI { NSWorkspace.shared.open(u) } }
-                FooterLink(title: "Log", symbol: "doc.text") { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) }
+                FooterLink(title: "agentgateway (EKS) UI", symbol: "safari") { if let u = lab.soloUI { NSWorkspace.shared.open(u) } }
                 Spacer()
+                Button { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) } label: {
+                    Image(systemName: "doc.text").font(.system(size: 12, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.05), in: Circle())
+                }
+                .buttonStyle(.plain).help("Open the log")
             }
         }
         .padding(18)
-        .frame(width: 390)
+        .frame(width: 400)
         .task { if !snapshotMode { await lab.loadInfo(); await lab.refresh() } }
         .onReceive(timer) { _ in Task { await lab.refresh() } }
         .alert("Stop every \(lab.cluster) node?", isPresented: $confirmStop) {
             Button("Stop", role: .destructive) { lab.start("down", label: "stopping") }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The gateway and Solo UI go offline until you start it again.")
+            Text("The agentgateway and its UI go offline until you start it again.")
         }
     }
 }

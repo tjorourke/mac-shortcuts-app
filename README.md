@@ -12,10 +12,10 @@ Click it in the Dock and you get:
 - a **connection pill**: green when your AWS SSO session is valid, red with a **Sign in**
   button that runs `aws sso login --profile <your profile>` and waits for the browser
 - a **status card**: platform nodes, GPU nodes and the cost per hour, refreshed every 20 s
-- **Start EKS** (platform nodes, waits until the Solo UI answers), **Start with GPUs**,
+- **Start EKS** (platform nodes, waits until the agentgateway UI answers), **Start with GPUs**,
   **Stop GPUs only** and **Stop EKS** (every node group to 0, control plane stays, asks first)
 - **Demo console**: opens the local demo console, starting it with `./run.sh` if it is down
-- **Solo UI** and **Log** links
+- **agentgateway (EKS) UI** link and a log button
 
 Every action runs `eks-lab` in the background and posts a macOS notification when it is done.
 
@@ -32,7 +32,7 @@ Needs the AWS CLI, kubectl and the Xcode command line tools (`xcode-select --ins
 
 ```bash
 eks-lab status          # node groups, billing instances, every running instance
-eks-lab up              # platform nodes, waits for the Solo UI
+eks-lab up              # platform nodes, waits for the agentgateway UI
 eks-lab gpu-up          # up, then the GPU node group (gpu.sh up)
 eks-lab gpu-down        # GPU node group to 0
 eks-lab down            # every node group to 0; waits until EC2 shows nothing billing

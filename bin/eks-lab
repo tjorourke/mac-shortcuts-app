@@ -2,9 +2,9 @@
 # Start and stop an EKS lab cluster from the command line, a Shortcut or the EKS Lab app.
 # Settings (AWS profile, cluster, URLs) live in ~/.config/eks-lab/config: see config.example.
 #
-#   eks-lab up        platform nodes (gateway + Solo UI), waits until soloui answers
+#   eks-lab up        platform nodes (agentgateway + UI), waits until the agentgateway UI answers
 #   eks-lab gpu-up    up, then the two g7e GPU nodes (about $11.70/hr more)
-#   eks-lab gpu-down  only the GPU node group to 0; gateway and Solo UI keep running
+#   eks-lab gpu-down  only the GPU node group to 0; agentgateway and its UI keep running
 #   eks-lab down      every node group to 0; the control plane and load balancers stay
 #   eks-lab status    node groups, running instances, rough cost per hour
 #   eks-lab console   open the demo console (localhost:8900), starting it first if it is down
@@ -78,7 +78,7 @@ platform_up() {
     case "$code" in 2??|3??|401) return 0 ;; esac
     sleep 15
   done
-  fail "nodes are up but the Solo UI did not answer within 15 minutes (last HTTP $code)"
+  fail "nodes are up but the agentgateway UI did not answer within 15 minutes (last HTTP $code)"
 }
 
 exec 9>"$LOCK"
@@ -91,18 +91,18 @@ case "$action" in
   up)
     check_login
     notify "Starting" "Platform nodes for $CLUSTER. About 5 to 10 minutes."
-    platform_up && notify "Ready" "Gateway and Solo UI are up. About \$0.90/hr."
+    platform_up && notify "Ready" "agentgateway and its UI are up. About \$0.90/hr."
     ;;
   gpu-up)
     check_login
     notify "Starting with GPUs" "Platform first, then two g7e GPUs. Up to 30 minutes."
     platform_up || exit 1
     "$GPU_SH" up || fail "GPU nodes did not come up. Platform is running. See $LOG"
-    notify "Ready with GPUs" "Gateway, Solo UI and both models. About \$12.60/hr. Stop it tonight."
+    notify "Ready with GPUs" "agentgateway, its UI and both models. About \$12.60/hr. Stop it tonight."
     ;;
   gpu-down)
     check_login
-    notify "Stopping GPUs" "Scaling the gpu node group to 0. Gateway and Solo UI stay up."
+    notify "Stopping GPUs" "Scaling the gpu node group to 0. agentgateway and its UI stay up."
     scale gpu 0 0
     for _ in $(seq 60); do
       left=$(running gpu)
@@ -150,7 +150,7 @@ case "$action" in
     aws sso login --profile "$AWS_PROFILE" >>"$LOG" 2>&1 || fail "AWS SSO login did not complete"
     aws sts get-caller-identity >/dev/null 2>&1 && notify "Signed in" "AWS SSO session is valid for $CLUSTER." || fail "Login finished but the session is not valid"
     ;;
-  info)  # for the Dock app: cluster, region, Solo UI URL, console URL, one per line
+  info)  # for the Dock app: cluster, region, agentgateway UI URL, console URL, one per line
     printf '%s\n%s\n%s\n%s\n' "$CLUSTER" "$AWS_REGION" "$UI_URL" "$CONSOLE_URL"
     ;;
   state)  # for the Dock app: "<platform> <gpu> <cost/hr> <busy>", or "login"
