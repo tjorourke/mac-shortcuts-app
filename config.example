@@ -1,0 +1,9 @@
+# Copy to ~/.config/eks-lab/config (install.sh does it) and fill in. Never commit the real one.
+AWS_PROFILE="your-sso-profile"            # the profile you use with: aws sso login --profile ...
+AWS_REGION="eu-west-2"
+CLUSTER="model-routing"                    # EKS cluster name
+KUBE_CONTEXT="arn:aws:eks:eu-west-2:<account-id>:cluster/model-routing"
+UI_URL="https://soloui.example.com/age/cost-management"   # opened by "Solo UI"; also the readiness check after Start
+GPU_SH="$HOME/path/to/agentgateway-inference-model-routing-eks/scripts/gpu.sh"
+CONSOLE_DIR="$HOME/path/to/vision-demo-2026/demo-console"  # started with ./run.sh when it is down
+CONSOLE_URL="http://localhost:8900/"

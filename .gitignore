@@ -1,0 +1,3 @@
+config
+*.unsigned.shortcut
+.DS_Store

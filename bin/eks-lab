@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Start and stop an EKS lab cluster from the command line, a Shortcut or the EKS Lab app.
+# Settings (AWS profile, cluster, URLs) live in ~/.config/eks-lab/config: see config.example.
+#
+#   eks-lab up        platform nodes (gateway + Solo UI), waits until soloui answers
+#   eks-lab gpu-up    up, then the two g7e GPU nodes (about $11.70/hr more)
+#   eks-lab gpu-down  only the GPU node group to 0; gateway and Solo UI keep running
+#   eks-lab down      every node group to 0; the control plane and load balancers stay
+#   eks-lab status    node groups, running instances, rough cost per hour
+#   eks-lab console   open the demo console (localhost:8900), starting it first if it is down
+#   eks-lab login     AWS SSO login for the profile (opens the browser, waits until done)
+#
+# Add --background to return at once and get a macOS notification when it finishes
+# (what the Shortcuts use). Log: ~/Library/Logs/eks-lab.log
+set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+CONFIG="${EKS_LAB_CONFIG:-$HOME/.config/eks-lab/config}"
+[ -f "$CONFIG" ] || { echo "missing $CONFIG (copy config.example)" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$CONFIG"
+export AWS_PROFILE AWS_REGION AWS_PAGER=""
+CTX="$KUBE_CONTEXT"
+CONSOLE_URL="${CONSOLE_URL:-http://localhost:8900/}"
+LOG="$HOME/Library/Logs/eks-lab.log"
+LOCK="${TMPDIR:-/tmp}/eks-lab.lock"
+CONSOLE_LOG="/tmp/console-8900.log"
+console_up() { curl -s -o /dev/null -m 3 "$CONSOLE_URL"; }
+
+notify() {
+  osascript -e "display notification \"${2//\"/}\" with title \"EKS lab\" subtitle \"${1//\"/}\" sound name \"Glass\"" >/dev/null 2>&1 || true
+  echo "$(date '+%F %T') $1: $2"
+}
+fail() { notify "Failed" "$1"; exit 1; }
+
+action="${1:-status}"
+if [ "${2:-}" = "--background" ]; then
+  nohup "$0" "$action" >>"$LOG" 2>&1 &
+  exit 0
+fi
+
+check_login() {
+  aws sts get-caller-identity >/dev/null 2>&1 && return
+  notify "AWS login expired" "Opening the SSO login in your browser. Run the shortcut again once you have signed in."
+  aws sso login >/dev/null 2>&1 &
+  exit 1
+}
+
+scale() {  # nodegroup desired [min]
+  local max
+  max=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$1" \
+        --query 'nodegroup.scalingConfig.maxSize' --output text) || fail "cannot read node group $1"
+  [ "$max" -ge "$2" ] 2>/dev/null || max="$2"
+  aws eks update-nodegroup-config --cluster-name "$CLUSTER" --nodegroup-name "$1" \
+    --scaling-config "minSize=${3:-$2},maxSize=$max,desiredSize=$2" >/dev/null \
+    || fail "could not scale $1 to $2"
+  echo "$(date '+%F %T') $1 -> desired $2"
+}
+
+running() {  # instances still billing for this cluster [node group]
+  aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=$CLUSTER" \
+    ${1:+"Name=tag:eks:nodegroup-name,Values=$1"} \
+    Name=instance-state-name,Values=pending,running,shutting-down,stopping \
+    --query 'Reservations[].Instances[].InstanceType' --output text
+}
+
+platform_up() {
+  scale platform 2
+  echo "$(date '+%F %T') waiting for two Ready platform nodes"
+  for _ in $(seq 60); do
+    ready=$(kubectl --context "$CTX" get nodes -l eks.amazonaws.com/nodegroup=platform --no-headers 2>/dev/null | grep -c ' Ready ')
+    [ "${ready:-0}" -ge 2 ] && break
+    sleep 20
+  done
+  [ "${ready:-0}" -ge 2 ] || fail "platform nodes not Ready after 20 minutes. See $LOG"
+  echo "$(date '+%F %T') nodes Ready, waiting for $UI_URL"
+  for _ in $(seq 60); do
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$UI_URL")
+    case "$code" in 2??|3??|401) return 0 ;; esac
+    sleep 15
+  done
+  fail "nodes are up but the Solo UI did not answer within 15 minutes (last HTTP $code)"
+}
+
+exec 9>"$LOCK"
+if [[ "$action" =~ ^(up|gpu-up|gpu-down|down)$ ]] && ! /usr/bin/lockf -t 0 9 2>/dev/null; then
+  notify "Busy" "Another start or stop is still running. Check $LOG"
+  exit 1
+fi
+
+case "$action" in
+  up)
+    check_login
+    notify "Starting" "Platform nodes for $CLUSTER. About 5 to 10 minutes."
+    platform_up && notify "Ready" "Gateway and Solo UI are up. About \$0.90/hr."
+    ;;
+  gpu-up)
+    check_login
+    notify "Starting with GPUs" "Platform first, then two g7e GPUs. Up to 30 minutes."
+    platform_up || exit 1
+    "$GPU_SH" up || fail "GPU nodes did not come up. Platform is running. See $LOG"
+    notify "Ready with GPUs" "Gateway, Solo UI and both models. About \$12.60/hr. Stop it tonight."
+    ;;
+  gpu-down)
+    check_login
+    notify "Stopping GPUs" "Scaling the gpu node group to 0. Gateway and Solo UI stay up."
+    scale gpu 0 0
+    for _ in $(seq 60); do
+      left=$(running gpu)
+      [ -z "$left" ] && { notify "GPUs stopped" "No GPU nodes billing. Weights stay on their volumes."; exit 0; }
+      sleep 20
+    done
+    fail "GPU nodes still running after 20 minutes: $left. Check for a stuck PodDisruptionBudget."
+    ;;
+  down)
+    check_login
+    notify "Stopping" "Scaling $CLUSTER node groups to 0. Control plane stays up."
+    for ng in $(aws eks list-nodegroups --cluster-name "$CLUSTER" --query nodegroups --output text); do
+      scale "$ng" 0 0
+    done
+    # Never trust the node group status: PDBs can stall the drain while nodes still bill.
+    for _ in $(seq 60); do
+      left=$(running)
+      [ -z "$left" ] && { notify "Stopped" "No $CLUSTER nodes billing. Control plane and load balancers about \$0.30/hr."; exit 0; }
+      sleep 20
+    done
+    fail "still running after 20 minutes: $left. Check for a stuck PodDisruptionBudget."
+    ;;
+  status)
+    check_login
+    aws eks list-nodegroups --cluster-name "$CLUSTER" --query nodegroups --output text | tr '\t' '\n' | while read -r ng; do
+      aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$ng" \
+        --query 'nodegroup.[nodegroupName,instanceTypes[0],scalingConfig.desiredSize,status]' --output text
+    done
+    echo "billing instances: $(running | tr '\t' ' ')"
+    echo "every running instance in $AWS_REGION:"
+    aws ec2 describe-instances --filters Name=instance-state-name,Values=running \
+      --query 'Reservations[].Instances[].[Tags[?Key==`eks:cluster-name`]|[0].Value,InstanceType]' --output text | sort | uniq -c
+    ;;
+  console)
+    if ! console_up; then
+      notify "Starting the demo console" "It was not running. Opening it once it answers."
+      # run.sh loads console.env, swaps weaveone for the sandbox profile and serves on 8900.
+      (cd "$CONSOLE_DIR" && nohup ./run.sh >>"$CONSOLE_LOG" 2>&1 &)
+      for _ in $(seq 60); do console_up && break; sleep 1; done
+      console_up || fail "the demo console did not start within a minute. See $CONSOLE_LOG"
+    fi
+    open "$CONSOLE_URL"
+    ;;
+  login)
+    aws sso login --profile "$AWS_PROFILE" >>"$LOG" 2>&1 || fail "AWS SSO login did not complete"
+    aws sts get-caller-identity >/dev/null 2>&1 && notify "Signed in" "AWS SSO session is valid for $CLUSTER." || fail "Login finished but the session is not valid"
+    ;;
+  info)  # for the Dock app: cluster, region, Solo UI URL, console URL, one per line
+    printf '%s\n%s\n%s\n%s\n' "$CLUSTER" "$AWS_REGION" "$UI_URL" "$CONSOLE_URL"
+    ;;
+  state)  # for the Dock app: "<platform> <gpu> <cost/hr> <busy>", or "login"
+    aws sts get-caller-identity >/dev/null 2>&1 || { echo "login $(console_up && echo 1 || echo 0)"; exit 0; }
+    p=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name platform --query 'nodegroup.scalingConfig.desiredSize' --output text)
+    g=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name gpu --query 'nodegroup.scalingConfig.desiredSize' --output text)
+    busy=0; /usr/bin/lockf -t 0 "$LOCK" true 2>/dev/null || busy=1
+    con=0; console_up && con=1
+    python3 -c "print($p, $g, f'{0.30 + 0.30*($p>0) + 0.222*$p + 5.85*$g:.2f}', $busy, $con)"
+    ;;
+  brief)  # one line for the Dock app's menu
+    aws sts get-caller-identity >/dev/null 2>&1 || { echo "AWS login expired: pick any action to sign in"; exit 0; }
+    p=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name platform --query 'nodegroup.scalingConfig.desiredSize' --output text)
+    g=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name gpu --query 'nodegroup.scalingConfig.desiredSize' --output text)
+    cost=$(python3 -c "print(f'{0.30 + 0.30*($p>0) + 0.222*$p + 5.85*$g:.2f}')")
+    state=$([ "$p" -gt 0 ] && echo "Platform on ($p nodes)" || echo "Platform off")
+    echo "$state, GPUs $([ "$g" -gt 0 ] && echo "on ($g)" || echo off). About \$$cost/hr."
+    ;;
+  *) echo "usage: eks-lab {up|gpu-up|gpu-down|down|status|state|login|console|info|brief} [--background]" >&2; exit 1 ;;
+esac
