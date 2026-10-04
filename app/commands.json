@@ -1,0 +1,54 @@
+{
+  "title": "Lab",
+  "refreshSeconds": 20,
+  "panels": [
+    {
+      "title": "EKS lab",
+      "symbol": "cloud.fill",
+      "tint": "blue",
+      "status": "eks-lab state-json",
+      "log": "~/Library/Logs/eks-lab.log",
+      "commands": [
+        { "title": "Start EKS", "detail": "agentgateway and its UI · about 5 to 10 min",
+          "symbol": "play.fill", "tint": "green", "run": "eks-lab up --background", "wait": true,
+          "disableWhen": ["busy", "error"] },
+        { "title": "Start with GPUs", "detail": "Adds two g7e GPUs · about $12.60/hr",
+          "symbol": "bolt.fill", "tint": "purple", "run": "eks-lab gpu-up --background", "wait": true,
+          "disableWhen": ["busy", "error"] },
+        { "title": "Stop GPUs only", "detail": "agentgateway and its UI keep running",
+          "symbol": "bolt.slash.fill", "tint": "orange", "run": "eks-lab gpu-down --background", "wait": true,
+          "disableWhen": ["busy", "error"] },
+        { "title": "Stop EKS", "detail": "Every node to 0 · control plane stays",
+          "symbol": "stop.fill", "tint": "red", "run": "eks-lab down --background", "wait": true,
+          "disableWhen": ["busy", "error"],
+          "confirm": { "title": "Stop every EKS node?", "message": "The agentgateway and its UI go offline until you start it again.", "button": "Stop" } },
+        { "title": "Demo console", "style": "link", "symbol": "play.display", "run": "eks-lab console",
+          "wait": true, "check": "eks-lab console-up" },
+        { "title": "agentgateway (EKS) UI", "style": "link", "symbol": "safari",
+          "run": "open \"$(eks-lab info | sed -n 3p)\"", "wait": true }
+      ]
+    },
+    {
+      "title": "Mail triage",
+      "symbol": "envelope.badge.fill",
+      "tint": "teal",
+      "cwd": "~/code/mail-triage",
+      "status": "./service.sh state-json",
+      "log": "~/code/mail-triage/logs/triage.log",
+      "commands": [
+        { "title": "Start", "detail": "Load the launchd agent · checks hourly",
+          "symbol": "play.fill", "tint": "green", "run": "./service.sh start", "wait": true,
+          "disableWhen": ["ok", "warn"] },
+        { "title": "Stop", "detail": "Unload now · back at next login",
+          "symbol": "stop.fill", "tint": "red", "run": "./service.sh stop", "wait": true,
+          "disableWhen": ["off"],
+          "confirm": { "title": "Stop mail triage?", "message": "Nothing is labelled until you start it again or log in.", "button": "Stop" } },
+        { "title": "Deploy", "detail": "uv sync, reload the plist and restart",
+          "symbol": "arrow.triangle.2.circlepath", "tint": "indigo", "run": "./service.sh deploy" },
+        { "title": "Pause 2h", "style": "link", "symbol": "pause.fill", "run": ".venv/bin/triage pause 2h", "wait": true },
+        { "title": "Resume", "style": "link", "symbol": "play.fill", "run": ".venv/bin/triage resume", "wait": true },
+        { "title": "Gmail", "style": "link", "symbol": "safari", "run": "open https://mail.google.com/mail/u/0/#label/AI%2FFiltered", "wait": true }
+      ]
+    }
+  ]
+}

@@ -161,6 +161,31 @@ case "$action" in
     con=0; console_up && con=1
     python3 -c "print($p, $g, f'{0.30 + 0.30*($p>0) + 0.222*$p + 5.85*$g:.2f}', $busy, $con)"
     ;;
+  state-json)  # for the Dock app's commands.json status contract: one JSON object
+    con=0; console_up && con=1
+    if ! aws sts get-caller-identity >/dev/null 2>&1; then
+      printf '{"state":"error","text":"AWS login expired","detail":"Sign in to read the node groups.","subtitle":"%s \u00b7 %s","action":{"title":"Sign in","run":"eks-lab login","help":"Runs aws sso login for the lab profile"}}\n' "$CLUSTER" "$AWS_REGION"
+      exit 0
+    fi
+    p=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name platform --query 'nodegroup.scalingConfig.desiredSize' --output text)
+    g=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name gpu --query 'nodegroup.scalingConfig.desiredSize' --output text)
+    busy=0; /usr/bin/lockf -t 0 "$LOCK" true 2>/dev/null || busy=1
+    P="$p" G="$g" BUSY="$busy" SUB="$CLUSTER · $AWS_REGION" python3 - <<'PY'
+import json, os
+p, g, busy = int(os.environ["P"]), int(os.environ["G"]), os.environ["BUSY"] == "1"
+cost = 0.30 + 0.30 * (p > 0) + 0.222 * p + 5.85 * g
+state = "busy" if busy else ("hot" if g else ("ok" if p else "off"))
+text = "Working…" if busy else ("Running with GPUs" if g else ("Running" if p else "Stopped"))
+detail = (f"{p} platform nodes" if p else "no platform nodes") + ", " + (f"{g} GPUs" if g else "GPUs off")
+if busy:
+    detail += " · start or stop in progress"
+print(json.dumps({"state": state, "text": text, "detail": detail, "subtitle": os.environ["SUB"],
+                  "badge": f"${cost:.2f}", "badgeCaption": "per hour"}))
+PY
+    ;;
+  console-up)  # exit 0 when the demo console answers
+    console_up
+    ;;
   brief)  # one line for the Dock app's menu
     aws sts get-caller-identity >/dev/null 2>&1 || { echo "AWS login expired: pick any action to sign in"; exit 0; }
     p=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name platform --query 'nodegroup.scalingConfig.desiredSize' --output text)
@@ -169,5 +194,5 @@ case "$action" in
     state=$([ "$p" -gt 0 ] && echo "Platform on ($p nodes)" || echo "Platform off")
     echo "$state, GPUs $([ "$g" -gt 0 ] && echo "on ($g)" || echo off). About \$$cost/hr."
     ;;
-  *) echo "usage: eks-lab {up|gpu-up|gpu-down|down|status|state|login|console|info|brief} [--background]" >&2; exit 1 ;;
+  *) echo "usage: eks-lab {up|gpu-up|gpu-down|down|status|state|state-json|login|console|console-up|info|brief} [--background]" >&2; exit 1 ;;
 esac

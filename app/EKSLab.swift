@@ -1,119 +1,248 @@
-// EKS Lab: a small window for starting and stopping an EKS lab cluster.
-// Every action runs ~/.local/bin/eks-lab, which owns the AWS calls and notifications.
+// A Dock app whose panels and buttons come from commands.json (bundled by ./build.sh).
+// Each panel has an optional status script, a list of commands and a log. See the README for the format.
 // Build: ./build.sh
 import SwiftUI
 import AppKit
 
-let eks = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/eks-lab").path
-let logPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/eks-lab.log").path
+let home = FileManager.default.homeDirectoryForCurrentUser.path
+let appLog = home + "/Library/Logs/mac-shortcuts-app.log"
+let shellPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(home)/.local/bin"
+func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }
 
-func run(_ args: [String]) async -> String {
+// MARK: config (commands.json)
+
+struct Confirm: Decodable { let title: String; let message: String?; let button: String? }
+
+struct Command: Decodable, Identifiable {
+    var id: String { title }
+    let title: String
+    let detail: String?
+    let symbol: String?
+    let tint: String?
+    let run: String
+    let style: String?          // "button" (default) or "link"
+    let wait: Bool?             // true: run in the app and refresh after; false: detached, notify when done
+    let confirm: Confirm?
+    let check: String?          // exit 0 shows a green dot (links only)
+    let disableWhen: [String]?  // status states in which this is greyed out
+    var isLink: Bool { style == "link" }
+}
+
+struct Panel: Decodable, Identifiable {
+    var id: String { title }
+    let title: String
+    let symbol: String?
+    let tint: String?
+    let cwd: String?
+    let status: String?         // prints one JSON object, see Status
+    let log: String?
+    let commands: [Command]
+}
+
+struct Config: Decodable {
+    let title: String?
+    let refreshSeconds: Double?
+    let panels: [Panel]
+}
+
+// What a status script prints.
+struct StatusAction: Decodable { let title: String; let run: String; let help: String? }
+struct Status: Decodable {
+    let state: String           // ok | hot | busy | warn | error | off
+    let text: String
+    let detail: String?
+    let subtitle: String?
+    let badge: String?
+    let badgeCaption: String?
+    let action: StatusAction?
+}
+
+func loadConfig() -> Config {
+    let a = CommandLine.arguments
+    let path = a.firstIndex(of: "--config").flatMap { a.count > $0 + 1 ? a[$0 + 1] : nil }
+        ?? Bundle.main.path(forResource: "commands", ofType: "json")
+    guard let path, let data = FileManager.default.contents(atPath: path) else {
+        return Config(title: "No commands.json", refreshSeconds: nil, panels: [])
+    }
+    do { return try JSONDecoder().decode(Config.self, from: data) } catch {
+        return Config(title: "commands.json: \(error)", refreshSeconds: nil, panels: [])
+    }
+}
+
+func colour(_ name: String?) -> Color {
+    switch name {
+    case "green": .green; case "red": .red; case "orange": .orange; case "purple": .purple
+    case "pink": .pink; case "yellow": .yellow; case "teal": .teal; case "indigo": .indigo
+    case "mint": .mint; case "cyan": .cyan; case "brown": .brown; case "gray", "grey": .gray
+    default: .blue
+    }
+}
+
+func stateColour(_ s: Status?) -> Color {
+    switch s?.state {
+    case "ok": .green; case "hot": .pink; case "busy": .orange; case "warn": .yellow; case "error": .red
+    default: .gray
+    }
+}
+
+// MARK: running shell commands
+
+private final class Capture: @unchecked Sendable {
+    private var data = Data()
+    private let lock = NSLock()
+    func append(_ d: Data) { lock.lock(); data.append(d); lock.unlock() }
+    var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
+}
+
+func makeProcess(_ cmd: String, cwd: String?, env extra: [String: String] = [:]) -> Process {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/bash")
+    p.arguments = ["-c", cmd]
+    var env = ProcessInfo.processInfo.environment
+    env["PATH"] = shellPATH
+    extra.forEach { env[$0] = $1 }
+    p.environment = env
+    if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: expand(cwd)) }
+    return p
+}
+
+/// Runs a command and returns its exit code and stdout. Reads as output arrives rather than at EOF,
+/// so a child that keeps the pipe open (a backgrounded server) cannot hang the app.
+func run(_ cmd: String, cwd: String?) async -> (code: Int32, out: String) {
     await withCheckedContinuation { cont in
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: eks)
-        p.arguments = args
-        let pipe = Pipe()
+        let p = makeProcess(cmd, cwd: cwd)
+        let pipe = Pipe(), out = Capture()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { _ in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            cont.resume(returning: String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+        pipe.fileHandleForReading.readabilityHandler = { h in out.append(h.availableData) }
+        p.terminationHandler = { proc in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                cont.resume(returning: (proc.terminationStatus, out.text.trimmingCharacters(in: .whitespacesAndNewlines)))
+            }
         }
-        do { try p.run() } catch { cont.resume(returning: "") }
+        do { try p.run() } catch { cont.resume(returning: (-1, "")) }
+    }
+}
+
+/// Runs a command with its output in appLog and a macOS notification when it ends.
+/// The notification comes from the shell, so it still arrives if the window is closed meanwhile.
+func runDetached(_ cmd: String, cwd: String?, panel: String, title: String, done: @escaping @Sendable (Int32) -> Void) {
+    let wrapper = """
+    { echo "$(date '+%F %T') > $LAB_PANEL / $LAB_TITLE: $LAB_CMD"; bash -c "$LAB_CMD"; } >>"$LAB_LOG" 2>&1
+    rc=$?
+    echo "$(date '+%F %T') < exit $rc" >>"$LAB_LOG"
+    if [ $rc -eq 0 ]; then LAB_MSG="Done"; else LAB_MSG="Failed (exit $rc). See $LAB_LOG"; fi
+    export LAB_MSG
+    osascript -e 'display notification (system attribute "LAB_MSG") with title (system attribute "LAB_PANEL") subtitle (system attribute "LAB_TITLE") sound name "Glass"' >/dev/null 2>&1
+    exit $rc
+    """
+    let p = makeProcess(wrapper, cwd: cwd, env: ["LAB_CMD": cmd, "LAB_LOG": appLog, "LAB_PANEL": panel, "LAB_TITLE": title])
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    p.terminationHandler = { done($0.terminationStatus) }
+    do { try p.run() } catch { done(-1) }
+}
+
+func notify(_ title: String, _ subtitle: String, _ message: String) {
+    let p = makeProcess(#"osascript -e 'display notification (system attribute "M") with title (system attribute "T") subtitle (system attribute "S")'"#,
+                        cwd: nil, env: ["T": title, "S": subtitle, "M": message])
+    try? p.run()
+}
+
+// MARK: model
+
+@MainActor
+final class PanelModel: ObservableObject, Identifiable {
+    let panel: Panel
+    nonisolated var id: String { panel.title }
+    @Published var status: Status?
+    @Published var statusError: String?
+    @Published var loading = true
+    @Published var running: Set<String> = []
+    @Published var checks: [String: Bool] = [:]
+
+    init(_ panel: Panel) { self.panel = panel; loading = panel.status != nil }
+
+    func refresh() async {
+        async let checked: [(String, Bool)] = withTaskGroup(of: (String, Bool).self) { g in
+            for c in panel.commands { if let chk = c.check { g.addTask { (c.title, await run(chk, cwd: self.panel.cwd).code == 0) } } }
+            return await g.reduce(into: []) { $0.append($1) }
+        }
+        if let cmd = panel.status {
+            let (code, out) = await run(cmd, cwd: panel.cwd)
+            if let s = try? JSONDecoder().decode(Status.self, from: Data(out.utf8)) {
+                status = s; statusError = nil
+            } else if status == nil {
+                statusError = code == 0 ? "status script printed no JSON" : "status script failed (exit \(code))"
+            }
+        }
+        loading = false
+        for (k, v) in await checked { checks[k] = v }
+    }
+
+    func disabled(_ c: Command) -> Bool {
+        if running.contains(c.title) { return true }
+        guard let when = c.disableWhen, !when.isEmpty else { return false }
+        if loading || status == nil { return panel.status != nil }
+        return when.contains(status!.state)
+    }
+
+    func perform(_ c: Command) { exec(c.title, c.run, wait: c.wait ?? false) }
+    func perform(_ a: StatusAction) { exec(a.title, a.run, wait: true) }
+
+    private func exec(_ title: String, _ cmd: String, wait: Bool) {
+        running.insert(title)
+        if wait {
+            Task {
+                let (code, _) = await run(cmd, cwd: panel.cwd)
+                if code != 0 { notify(panel.title, title, "Failed (exit \(code))") }
+                try? await Task.sleep(for: .seconds(2))
+                running.remove(title)
+                await refresh()
+            }
+        } else {
+            Task { await refresh() }
+            runDetached(cmd, cwd: panel.cwd, panel: panel.title, title: title) { _ in
+                Task { @MainActor in self.running.remove(title); await self.refresh() }
+            }
+        }
     }
 }
 
 @MainActor
-final class Lab: ObservableObject {
-    @Published var platform = -1
-    @Published var gpus = -1
-    @Published var cost = ""
-    @Published var busy = false
-    @Published var needsLogin = false
-    @Published var loading = true
-    @Published var lastAction: String?
-    @Published var signingIn = false
-    @Published var cluster = "EKS"
-    @Published var region = ""
-    @Published var soloUI: URL?
-    @Published var consoleURL: URL?
-    @Published var consoleUp = false
-
-    func loadInfo() async {
-        let lines = await run(["info"]).split(separator: "\n").map(String.init)
-        guard lines.count >= 4 else { return }
-        cluster = lines[0]; region = lines[1]
-        soloUI = URL(string: lines[2]); consoleURL = URL(string: lines[3])
-    }
-    @Published var openingConsole = false
-
-    func openConsole() {
-        openingConsole = true
-        Task {
-            _ = await run(["console"])
-            openingConsole = false
-            await refresh()
-        }
-    }
-
-    func signIn() {
-        signingIn = true
-        Task {
-            _ = await run(["login"])
-            signingIn = false
-            await refresh()
-        }
-    }
-
-    func refresh() async {
-        loading = platform < 0
-        let out = await run(["state"])
-        loading = false
-        if out.isEmpty { return }
-        if out.hasPrefix("login") { needsLogin = true; platform = 0; gpus = 0; cost = ""; consoleUp = out.hasSuffix(" 1"); return }
-        needsLogin = false
-        let parts = out.split(separator: " ").map(String.init)
-        guard parts.count >= 4 else { return }
-        consoleUp = parts.count > 4 && parts[4] == "1"
-        platform = Int(parts[0]) ?? 0
-        gpus = Int(parts[1]) ?? 0
-        cost = parts[2]
-        busy = parts[3] == "1"
-    }
-
-    func start(_ action: String, label: String) {
-        lastAction = label
-        busy = true
-        Task {
-            _ = await run([action, "--background"])
-            try? await Task.sleep(for: .seconds(3))
-            await refresh()
-        }
+final class AppModel: ObservableObject {
+    let config: Config
+    let panels: [PanelModel]
+    init(_ config: Config) { self.config = config; panels = config.panels.map(PanelModel.init) }
+    func refreshAll() async {
+        await withTaskGroup(of: Void.self) { g in for p in panels { g.addTask { await p.refresh() } } }
     }
 }
 
+// MARK: views
+
 struct ActionButton: View {
-    let title: String
-    let detail: String
-    let symbol: String
-    let tint: Color
+    let command: Command
+    let busy: Bool
     let action: () -> Void
     @State private var hover = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: symbol)
+                Image(systemName: command.symbol ?? "terminal.fill")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
-                    .background(tint.gradient, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(colour(command.tint).gradient, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.system(size: 13, weight: .semibold))
-                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(command.title).font(.system(size: 13, weight: .semibold))
+                    if let d = command.detail { Text(d).font(.system(size: 11)).foregroundStyle(.secondary) }
                 }
                 Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
+                if busy { ProgressView().controlSize(.small) }
+                else { Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary) }
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
             .background(hover ? Color.primary.opacity(0.07) : Color.primary.opacity(0.035),
@@ -125,157 +254,166 @@ struct ActionButton: View {
     }
 }
 
-struct ConnectionPill: View {
-    @ObservedObject var lab: Lab
-    var body: some View {
-        let connected = !lab.needsLogin && !lab.loading
-        HStack(spacing: 6) {
-            Circle().fill(lab.loading ? Color.gray : (connected ? Color.green : Color.red))
-                .frame(width: 8, height: 8)
-                .shadow(color: (connected ? Color.green : Color.red).opacity(lab.loading ? 0 : 0.8), radius: 3)
-            if lab.needsLogin {
-                Button { lab.signIn() } label: {
-                    Text(lab.signingIn ? "Waiting…" : "Sign in").lineLimit(1).fixedSize()
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
-                        .padding(.horizontal, 9).padding(.vertical, 4)
-                        .background(Color.red.gradient, in: Capsule())
-                }
-                .buttonStyle(.plain).disabled(lab.signingIn)
-                .help("Runs aws sso login for the lab profile")
-            } else {
-                Text(lab.loading ? "Checking" : "Connected").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
-            }
-        }
-        .padding(.leading, 8).padding(.trailing, lab.needsLogin ? 3 : 10).padding(.vertical, 3)
-        .background(Color.primary.opacity(0.05), in: Capsule())
-    }
-}
-
-struct FooterLink: View {
-    let title: String
-    let symbol: String
+struct LinkButton: View {
+    let command: Command
+    let busy: Bool
+    let check: Bool?
     let action: () -> Void
     @State private var hover = false
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: symbol).font(.system(size: 12, weight: .medium)).lineLimit(1).fixedSize()
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.primary.opacity(hover ? 0.09 : 0.05), in: Capsule())
+            HStack(spacing: 6) {
+                if let check { Circle().fill(check ? Color.green : Color.red).frame(width: 7, height: 7) }
+                else { Image(systemName: command.symbol ?? "link") }
+                Text(busy ? "Working…" : command.title)
+            }
+            .font(.system(size: 12, weight: .medium)).lineLimit(1).fixedSize()
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color.primary.opacity(hover ? 0.09 : 0.05), in: Capsule())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
+        .help(command.detail ?? command.run)
+    }
+}
+
+struct CircleIcon: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary).frame(width: 28, height: 28)
+                .background(Color.primary.opacity(0.05), in: Circle())
+        }
+        .buttonStyle(.plain).help(help)
+    }
+}
+
+struct PanelView: View {
+    @ObservedObject var model: PanelModel
+    @State private var confirming: Command?
+
+    var panel: Panel { model.panel }
+    var buttons: [Command] { panel.commands.filter { !$0.isLink } }
+    var links: [Command] { panel.commands.filter(\.isLink) }
+
+    func tap(_ c: Command) { if c.confirm != nil { confirming = c } else { model.perform(c) } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: panel.symbol ?? "square.grid.2x2.fill")
+                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(colour(panel.tint).gradient, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(panel.title).font(.system(size: 15, weight: .bold))
+                    if let sub = model.status?.subtitle {
+                        Text(sub).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer()
+                if let a = model.status?.action {
+                    let busy = model.running.contains(a.title)
+                    Button { model.perform(a) } label: {
+                        Text(busy ? "Waiting…" : a.title).lineLimit(1).fixedSize()
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(Color.red.gradient, in: Capsule())
+                    }
+                    .buttonStyle(.plain).disabled(busy).help(a.help ?? a.run)
+                }
+                if let log = panel.log {
+                    CircleIcon(symbol: "doc.text", help: "Open \(log)") { NSWorkspace.shared.open(URL(fileURLWithPath: expand(log))) }
+                }
+            }
+
+            if panel.status != nil { statusCard }
+
+            if !buttons.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(buttons) { c in
+                        ActionButton(command: c, busy: model.running.contains(c.title)) { tap(c) }
+                            .disabled(model.disabled(c))
+                            .opacity(model.disabled(c) ? 0.5 : 1)
+                    }
+                }
+            }
+
+            if !links.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(links) { c in
+                        LinkButton(command: c, busy: model.running.contains(c.title), check: c.check == nil ? nil : model.checks[c.title] ?? false) { tap(c) }
+                            .disabled(model.disabled(c))
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .alert(confirming?.confirm?.title ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
+            Button(confirming?.confirm?.button ?? "Run", role: .destructive) { if let c = confirming { model.perform(c) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(confirming?.confirm?.message ?? confirming?.run ?? "")
+        }
+    }
+
+    var statusCard: some View {
+        let c = stateColour(model.status)
+        return HStack(spacing: 12) {
+            Circle().fill(c).frame(width: 10, height: 10).shadow(color: c.opacity(0.7), radius: 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.loading ? "Checking…" : (model.status?.text ?? model.statusError ?? "Unknown"))
+                    .font(.system(size: 14, weight: .semibold))
+                if let d = model.status?.detail, !model.loading {
+                    Text(d).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            Spacer()
+            if let b = model.status?.badge, !b.isEmpty {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(b).font(.system(size: 18, weight: .bold, design: .rounded)).monospacedDigit()
+                    if let cap = model.status?.badgeCaption { Text(cap).font(.system(size: 10)).foregroundStyle(.secondary) }
+                }
+            }
+        }
+        .padding(12)
+        .background(c.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(c.opacity(0.25)))
     }
 }
 
 struct ContentView: View {
-    @StateObject var lab: Lab
-    @State private var confirmStop = false
-    let timer = Timer.publish(every: 20, on: .main, in: .common).autoconnect()
+    @ObservedObject var app: AppModel
+    let timer: Timer.TimerPublisher
 
-    var statusColour: Color {
-        if lab.needsLogin { return .red }
-        if lab.busy { return .orange }
-        if lab.gpus > 0 { return .pink }
-        return lab.platform > 0 ? .green : .gray
-    }
-    var statusText: String {
-        if lab.needsLogin { return "AWS login expired" }
-        if lab.loading { return "Checking…" }
-        if lab.busy { return "Working…" }
-        if lab.gpus > 0 { return "Running with GPUs" }
-        return lab.platform > 0 ? "Running" : "Stopped"
-    }
-    var statusDetail: String {
-        if lab.needsLogin { return lab.signingIn ? "Finish the sign-in in your browser." : "Click Sign in at the top to open the AWS SSO login." }
-        if lab.loading { return "Reading the node groups" }
-        let p = lab.platform > 0 ? "\(lab.platform) platform nodes" : "no platform nodes"
-        let g = lab.gpus > 0 ? "\(lab.gpus) GPUs" : "GPUs off"
-        let extra = lab.busy ? (lab.lastAction.map { " · \($0)" } ?? " · start or stop in progress") : ""
-        return "\(p), \(g)\(extra)"
+    init(app: AppModel) {
+        self.app = app
+        timer = Timer.publish(every: app.config.refreshSeconds ?? 20, on: .main, in: .common)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 44, height: 44)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("EKS lab").font(.system(size: 17, weight: .bold))
-                    Text(lab.region.isEmpty ? lab.cluster : "\(lab.cluster) · \(lab.region)").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
-                }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
+                Text(app.config.title ?? "Lab").font(.system(size: 17, weight: .bold)).lineLimit(2)
                 Spacer()
-                ConnectionPill(lab: lab)
-                Button { Task { await lab.refresh() } } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary).frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.06), in: Circle())
+                CircleIcon(symbol: "terminal", help: "Open the log of commands run from here") {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: appLog))
                 }
-                .buttonStyle(.plain).help("Refresh")
+                CircleIcon(symbol: "arrow.clockwise", help: "Refresh") { Task { await app.refreshAll() } }
             }
-
-            HStack(spacing: 12) {
-                Circle().fill(statusColour).frame(width: 10, height: 10)
-                    .shadow(color: statusColour.opacity(0.7), radius: 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(statusText).font(.system(size: 14, weight: .semibold))
-                    Text(statusDetail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
-                }
-                Spacer()
-                if !lab.cost.isEmpty && !lab.needsLogin {
-                    VStack(alignment: .trailing, spacing: 0) {
-                        Text("$\(lab.cost)").font(.system(size: 18, weight: .bold, design: .rounded)).monospacedDigit()
-                        Text("per hour").font(.system(size: 10)).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(12)
-            .background(statusColour.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(statusColour.opacity(0.25)))
-
-            VStack(spacing: 6) {
-                ActionButton(title: "Start EKS", detail: "agentgateway and its UI · about 5 to 10 min",
-                             symbol: "play.fill", tint: .green) { lab.start("up", label: "starting") }
-                ActionButton(title: "Start with GPUs", detail: "Adds two g7e GPUs · about $12.60/hr",
-                             symbol: "bolt.fill", tint: .purple) { lab.start("gpu-up", label: "starting with GPUs") }
-                ActionButton(title: "Stop GPUs only", detail: "agentgateway and its UI keep running",
-                             symbol: "bolt.slash.fill", tint: .orange) { lab.start("gpu-down", label: "stopping GPUs") }
-                ActionButton(title: "Stop EKS", detail: "Every node to 0 · control plane stays",
-                             symbol: "stop.fill", tint: .red) { confirmStop = true }
-            }
-            .disabled(lab.busy || lab.needsLogin)
-            .opacity(lab.busy || lab.needsLogin ? 0.5 : 1)
-
-            HStack(spacing: 8) {
-                Button { lab.openConsole() } label: {
-                    HStack(spacing: 6) {
-                        Circle().fill(lab.consoleUp ? Color.green : Color.red).frame(width: 7, height: 7)
-                        Text(lab.openingConsole ? "Starting…" : (lab.consoleUp ? "Demo console" : "Start console"))
-                            .font(.system(size: 12, weight: .semibold)).lineLimit(1).fixedSize()
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(Color.accentColor.opacity(0.14), in: Capsule())
-                }
-                .buttonStyle(.plain).disabled(lab.openingConsole)
-                .help("Opens the demo console, starting it first if it is down")
-                FooterLink(title: "agentgateway (EKS) UI", symbol: "safari") { if let u = lab.soloUI { NSWorkspace.shared.open(u) } }
-                Spacer()
-                Button { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) } label: {
-                    Image(systemName: "doc.text").font(.system(size: 12, weight: .medium))
-                        .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.05), in: Circle())
-                }
-                .buttonStyle(.plain).help("Open the log")
+            ForEach(Array(app.panels.enumerated()), id: \.element.id) { i, p in
+                if i > 0 { Divider() }
+                PanelView(model: p)
             }
         }
         .padding(18)
         .frame(width: 400)
-        .task { if !snapshotMode { await lab.loadInfo(); await lab.refresh() } }
-        .onReceive(timer) { _ in Task { await lab.refresh() } }
-        .alert("Stop every \(lab.cluster) node?", isPresented: $confirmStop) {
-            Button("Stop", role: .destructive) { lab.start("down", label: "stopping") }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The agentgateway and its UI go offline until you start it again.")
-        }
+        .task { if !snapshotMode { await app.refreshAll() } }
+        .onReceive(timer.autoconnect()) { _ in Task { await app.refreshAll() } }
     }
 }
 
@@ -284,40 +422,36 @@ let snapshotMode = CommandLine.arguments.contains("--snapshot")
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    // eks-lab's own check: EKSLab --snapshot <out.png> <platform> <gpus> <cost> <busy> [dark]
+    // Layout check without clicking: EKSLab --snapshot <out.png> [dark] [--config file]
+    // Runs every status script once, renders the window to a PNG and exits.
     @MainActor func applicationDidFinishLaunching(_ note: Notification) {
+        if !FileManager.default.fileExists(atPath: appLog) { FileManager.default.createFile(atPath: appLog, contents: nil) }
         let a = CommandLine.arguments
-        guard let i = a.firstIndex(of: "--snapshot"), a.count > i + 5 else { return }
-        let lab = Lab()
-        lab.loading = false
-        lab.needsLogin = a[i + 2] == "login"
-        lab.signingIn = a[i + 2] == "login" && a[i + 5] == "1"
-        lab.platform = Int(a[i + 2]) ?? 0
-        lab.gpus = Int(a[i + 3]) ?? 0
-        lab.cost = a[i + 4]
-        lab.busy = !lab.needsLogin && a[i + 5] == "1"
-        lab.consoleUp = !a.contains("console-down")
-        lab.cluster = "model-routing"; lab.region = "eu-west-2"
-        lab.lastAction = lab.busy ? "starting" : nil
-        let dark = a.count > i + 6 && a[i + 6] == "dark"
-        let view = ContentView(lab: lab)
-            .background(dark ? Color(white: 0.15) : Color(white: 0.96))
-            .environment(\.colorScheme, dark ? .dark : .light)
-        let r = ImageRenderer(content: view)
-        r.scale = 2
-        if let img = r.nsImage, let tiff = img.tiffRepresentation,
-           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
-            try? png.write(to: URL(fileURLWithPath: a[i + 1]))
+        guard let i = a.firstIndex(of: "--snapshot"), a.count > i + 1 else { return }
+        let app = AppModel(loadConfig())
+        Task { @MainActor in
+            await app.refreshAll()
+            let dark = a.contains("dark")
+            let view = ContentView(app: app)
+                .background(dark ? Color(white: 0.15) : Color(white: 0.96))
+                .environment(\.colorScheme, dark ? .dark : .light)
+            let r = ImageRenderer(content: view)
+            r.scale = 2
+            if let img = r.nsImage, let tiff = img.tiffRepresentation,
+               let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: a[i + 1]))
+            }
+            exit(0)
         }
-        exit(0)
     }
 }
 
 @main
 struct EKSLabApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @StateObject private var app = AppModel(loadConfig())
     var body: some Scene {
-        WindowGroup("EKS lab") { ContentView(lab: Lab()) }
+        WindowGroup(app.config.title ?? "Lab") { ContentView(app: app) }
             .windowResizability(.contentSize)
             .windowStyle(.hiddenTitleBar)
     }

@@ -51,13 +51,64 @@ Only one start or stop runs at a time. Log: `~/Library/Logs/eks-lab.log`.
 **Stop EKS**. Double-click to import, then turn on **Settings → Advanced → Allow Running
 Scripts** in Shortcuts. They appear in the Shortcuts menu-bar icon and work with Siri.
 
+## Adding commands (commands.json)
+
+The window is built from `app/commands.json`. Edit it and run `./build.sh`; the file is copied
+into the app bundle, so new panels and buttons appear on the next launch.
+
+```jsonc
+{
+  "title": "Lab",                     // window title
+  "refreshSeconds": 20,               // how often every status script runs
+  "panels": [{
+    "title": "Mail triage",
+    "symbol": "envelope.badge.fill",  // any SF Symbol name (SF Symbols.app lists them)
+    "tint": "teal",                   // green red orange purple pink yellow teal indigo mint cyan brown gray blue
+    "cwd": "~/code/mail-triage",      // working directory for every script in the panel
+    "status": "./service.sh state-json",   // optional, see below
+    "log": "~/code/mail-triage/logs/triage.log",  // optional, adds a log button
+    "commands": [{
+      "title": "Deploy", "detail": "second line", "symbol": "arrow.triangle.2.circlepath", "tint": "indigo",
+      "run": "./service.sh deploy",   // any bash; PATH includes Homebrew and ~/.local/bin
+      "wait": false,                  // false (default): runs detached, output to the app log, notification when done
+                                      // true: the app waits for it, then refreshes the status
+      "style": "button",              // or "link" for a small pill in the row under the buttons
+      "check": "curl -sf localhost:8900",   // links only: exit 0 shows a green dot, otherwise red
+      "disableWhen": ["busy", "error"],     // status states that grey the command out
+      "confirm": { "title": "Sure?", "message": "…", "button": "Deploy" }  // ask first
+    }]
+  }]
+}
+```
+
+A **status** script prints one JSON object:
+
+```json
+{"state": "ok", "text": "Running", "detail": "second line", "subtitle": "under the panel title",
+ "badge": "$0.97", "badgeCaption": "per hour", "action": {"title": "Sign in", "run": "eks-lab login"}}
+```
+
+`state` sets the colour: `ok` green, `hot` pink, `busy` orange, `warn` yellow, `error` red, `off` grey.
+`action` adds a red pill in the panel header (the EKS panel uses it for AWS sign-in).
+`eks-lab state-json` and mail-triage's `./service.sh state-json` are the two examples.
+
+Output of detached commands goes to `~/Library/Logs/mac-shortcuts-app.log` (terminal icon, top right).
+
+## Mail triage panel
+
+Drives `~/code/mail-triage/service.sh`: **Start** (installs and loads the launchd agent),
+**Stop** (unloads it; it comes back at next login, `./service.sh uninstall` stops it for good),
+**Deploy** (`uv sync --frozen`, checks `triage` starts, re-copies the plist and reloads it),
+plus Pause 2h / Resume and a Gmail link.
+
 ## Changing the app
 
-Edit `app/EKSLab.swift` and run `./build.sh`. To check the layout without clicking anything:
+Edit `app/EKSLab.swift` and run `./build.sh`. To check the layout without clicking anything
+(runs every status script once, renders, exits):
 
 ```bash
-"$HOME/Applications/EKS Lab.app/Contents/MacOS/EKSLab" --snapshot /tmp/a.png 2 0 0.97 0 dark
-# args: out.png platform gpus cost busy [dark] [console-down]; platform "login" shows the signed-out state
+"$HOME/Applications/EKS Lab.app/Contents/MacOS/EKSLab" --snapshot /tmp/a.png dark
+# add --config path/to/other.json to try a config without rebuilding
 ```
 
 The icon is `icon/icon.html`, rendered with headless Chrome and packed with `iconutil`.
