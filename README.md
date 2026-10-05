@@ -96,7 +96,7 @@ Output of detached commands goes to `~/Library/Logs/mac-shortcuts-app.log` (term
 
 ## Mail triage panel
 
-Drives `~/code/mail-triage/service.sh`: **Start** (installs and loads the launchd agent),
+Drives `~/code/mail-triage/service.sh`: **Run now** (checks new mail at once: restarts the daemon, or a one-off `triage run` when paused or stopped), **Start** (installs and loads the launchd agent),
 **Stop** (unloads it; it comes back at next login, `./service.sh uninstall` stops it for good),
 **Deploy** (`uv sync --frozen`, checks `triage` starts, re-copies the plist and reloads it),
 plus Pause 2h / Resume and a Gmail link.

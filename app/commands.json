@@ -36,6 +36,9 @@
       "status": "./service.sh state-json",
       "log": "~/code/mail-triage/logs/triage.log",
       "commands": [
+        { "title": "Run now", "detail": "Check unread mail now, skipping the hourly wait",
+          "symbol": "bolt.fill", "tint": "purple", "run": "./service.sh run-now",
+          "disableWhen": ["busy"] },
         { "title": "Start", "detail": "Load the launchd agent · checks hourly",
           "symbol": "play.fill", "tint": "green", "run": "./service.sh start", "wait": true,
           "disableWhen": ["ok", "warn"] },
