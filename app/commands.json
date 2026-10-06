@@ -52,6 +52,30 @@
         { "title": "Resume", "style": "link", "symbol": "play.fill", "run": ".venv/bin/triage resume", "wait": true },
         { "title": "Gmail", "style": "link", "symbol": "safari", "run": "open https://mail.google.com/mail/u/0/#label/AI%2FFiltered", "wait": true }
       ]
+    },
+    {
+      "title": "Demo laptop",
+      "symbol": "laptopcomputer",
+      "tint": "indigo",
+      "status": "~/code/solo/solo-demos/vision-demo-2026/demo-console/wake-fix.sh state-json",
+      "log": "~/Library/Logs/wake-fix.log",
+      "commands": [
+        { "title": "Wake fix", "detail": "After a sleep: settle kind-mesh1, restart stuck pods, portal forward",
+          "symbol": "moon.zzz.fill", "tint": "indigo",
+          "run": "set -o pipefail; ~/code/solo/solo-demos/vision-demo-2026/demo-console/wake-fix.sh 2>&1 | tee ~/Library/Logs/wake-fix.log",
+          "wait": true },
+        { "title": "Unpark demos", "detail": "agentregistry, cost UI, kagent and the Keycloaks back on",
+          "symbol": "play.circle.fill", "tint": "green",
+          "run": "set -o pipefail; ~/code/solo/solo-demos/vision-demo-2026/demo-console/wake-fix.sh unpark 2>&1 | tee -a ~/Library/Logs/wake-fix.log",
+          "wait": true },
+        { "title": "Restart OrbStack", "detail": "Applies the 48 GiB memory limit · every cluster down for a minute",
+          "symbol": "arrow.triangle.2.circlepath", "tint": "orange",
+          "run": "orbctl stop && orbctl start", "wait": true,
+          "confirm": { "title": "Restart OrbStack?", "message": "Every Docker and kind cluster stops for a minute: mesh1, mesh2 and the live-* ones. Start them again afterwards and run Wake fix.", "button": "Restart" } },
+        { "title": "Virtual keys portal", "style": "link", "symbol": "key.fill",
+          "run": "open http://localhost:8900/keys", "wait": true,
+          "check": "curl -s --max-time 2 http://localhost:9080/healthz >/dev/null 2>&1" }
+      ]
     }
   ]
 }
