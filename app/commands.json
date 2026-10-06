@@ -60,7 +60,7 @@
       "status": "~/code/solo/solo-demos/vision-demo-2026/demo-console/wake-fix.sh state-json",
       "log": "~/Library/Logs/wake-fix.log",
       "commands": [
-        { "title": "Wake fix", "detail": "After a sleep: settle kind-mesh1, restart stuck pods, portal forward",
+        { "title": "Wake fix", "detail": "After a sleep: settle mesh1 + mesh2, restart stuck pods, portal forward",
           "symbol": "moon.zzz.fill", "tint": "indigo",
           "run": "set -o pipefail; ~/code/solo/solo-demos/vision-demo-2026/demo-console/wake-fix.sh 2>&1 | tee ~/Library/Logs/wake-fix.log",
           "wait": true },
