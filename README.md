@@ -7,7 +7,9 @@ without leaving it billing overnight.
 
 ## EKS Lab.app
 
-Click it in the Dock and you get:
+Click it in the Dock and you get one tab per panel (`EKS lab`, `Mail triage`,
+`Demo laptop`, …), each with a live status dot so a section needing attention shows it
+without being open. The selected tab is remembered across launches. On the EKS tab:
 
 - a **connection pill**: green when your AWS SSO session is valid, red with a **Sign in**
   button that runs `aws sso login --profile <your profile>` and waits for the browser
@@ -54,7 +56,8 @@ Scripts** in Shortcuts. They appear in the Shortcuts menu-bar icon and work with
 ## Adding commands (commands.json)
 
 The window is built from `app/commands.json`. Edit it and run `./build.sh`; the file is copied
-into the app bundle, so new panels and buttons appear on the next launch.
+into the app bundle, so new panels and buttons appear on the next launch. Each panel is one
+tab in the window, with the panel's symbol, title and status colour in the tab strip.
 
 ```jsonc
 {

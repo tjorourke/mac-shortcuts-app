@@ -388,14 +388,39 @@ struct PanelView: View {
 struct ContentView: View {
     @ObservedObject var app: AppModel
     let timer: Timer.TimerPublisher
+    @AppStorage("selectedTab") private var selected: String = ""
 
     init(app: AppModel) {
         self.app = app
         timer = Timer.publish(every: app.config.refreshSeconds ?? 20, on: .main, in: .common)
     }
 
+    var current: PanelModel? { app.panels.first { $0.id == selected } ?? app.panels.first }
+
+    var tabStrip: some View {
+        HStack(spacing: 6) {
+            ForEach(app.panels) { p in
+                let sel = current?.id == p.id
+                Button { selected = p.id } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: p.panel.symbol ?? "square.grid.2x2.fill")
+                        Text(p.panel.title).lineLimit(1)
+                        Circle().fill(stateColour(p.status)).frame(width: 6, height: 6)
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(sel ? colour(p.panel.tint).gradient : Color.primary.opacity(0.05).gradient, in: Capsule())
+                    .foregroundStyle(sel ? Color.white : Color.primary)
+                }
+                .buttonStyle(.plain)
+                .help(p.status?.text ?? p.panel.title)
+            }
+            Spacer()
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
                 Text(app.config.title ?? "Lab").font(.system(size: 17, weight: .bold)).lineLimit(2)
@@ -405,10 +430,8 @@ struct ContentView: View {
                 }
                 CircleIcon(symbol: "arrow.clockwise", help: "Refresh") { Task { await app.refreshAll() } }
             }
-            ForEach(Array(app.panels.enumerated()), id: \.element.id) { i, p in
-                if i > 0 { Divider() }
-                PanelView(model: p)
-            }
+            if app.panels.count > 1 { tabStrip }
+            if let current { PanelView(model: current) }
         }
         .padding(18)
         .frame(width: 400)
@@ -422,7 +445,7 @@ let snapshotMode = CommandLine.arguments.contains("--snapshot")
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    // Layout check without clicking: EKSLab --snapshot <out.png> [dark] [--config file]
+    // Layout check without clicking: EKSLab --snapshot <out.png> [dark] [--config file] [--tab N]
     // Runs every status script once, renders the window to a PNG and exits.
     @MainActor func applicationDidFinishLaunching(_ note: Notification) {
         if !FileManager.default.fileExists(atPath: appLog) { FileManager.default.createFile(atPath: appLog, contents: nil) }
@@ -432,6 +455,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             await app.refreshAll()
             let dark = a.contains("dark")
+            if let ti = a.firstIndex(of: "--tab"), a.count > ti + 1, let n = Int(a[ti + 1]),
+               app.panels.indices.contains(n) {
+                UserDefaults.standard.set(app.panels[n].id, forKey: "selectedTab")
+            }
             let view = ContentView(app: app)
                 .background(dark ? Color(white: 0.15) : Color(white: 0.96))
                 .environment(\.colorScheme, dark ? .dark : .light)
